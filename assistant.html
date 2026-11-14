@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistant</title>
+<style>
+  :root { --c: #39ff14; }
+  body { margin: 0; background: black; overflow: hidden; font-family: "Courier New", monospace; }
+  canvas { display: block; }
+  .hud { position: fixed; color: var(--c); text-shadow: 0 0 10px var(--c); letter-spacing: 3px; }
+  #title { top: 24px; left: 24px; font-size: 18px; }
+  #kepler { top: 64px; left: 24px; font-size: 12px; line-height: 1.8; letter-spacing: 2px; opacity: 0.8; }
+  #clock { top: 24px; right: 24px; font-size: 18px; }
+  #timer { top: 24px; left: 50%; transform: translateX(-50%); font-size: 18px; }
+  #boot { bottom: 40px; left: 24px; font-size: 16px; line-height: 1.8; max-width: 55%; }
+  #panel { bottom: 40px; right: 24px; font-size: 13px; text-align: right; letter-spacing: 2px; }
+  #bar { position: relative; width: 220px; height: 8px; border: 1px solid var(--c); margin: 8px 0 8px auto; }
+  #fill { height: 100%; width: 0; background: var(--c); }
+  #mark { position: absolute; top: -4px; width: 2px; height: 16px; background: white; }
+  #slider { width: 220px; }
+  #overlay { position: fixed; inset: 0; background: black; display: flex; align-items: center; justify-content: center; z-index: 10; }
+  #start { background: transparent; color: #39ff14; border: 1px solid #39ff14; padding: 16px 32px; font-family: inherit; font-size: 18px; letter-spacing: 3px; cursor: pointer; text-shadow: 0 0 10px #39ff14; box-shadow: 0 0 20px rgba(57,255,20,0.4); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud" id="title">ASSISTANT // 001</div>
+<div class="hud" id="kepler"></div>
+<div class="hud" id="clock"></div>
+<div class="hud" id="timer"></div>
+<div class="hud" id="boot"></div>
+<div class="hud" id="panel">
+  <div id="status">OFFLINE</div>
+  <div id="bar"><div id="fill"></div><div id="mark"></div></div>
+  <div>THRESHOLD <span id="thval">0.15</span> (LOWER = MORE SENSITIVE)</div>
+  <input type="range" id="slider" min="0.02" max="0.5" step="0.01" value="0.15">
+</div>
+<div id="overlay"><button id="start">TAP TO ACTIVATE</button></div>
+
+<script>
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener("resize", resize);
+
+// ---- COLORS ----
+const COLORS = {
+  green: "#39ff14", blue: "#1e90ff", red: "#ff2a2a", purple: "#b05cff",
+  orange: "#ff8c00", white: "#ffffff", yellow: "#ffee00", pink: "#ff4fd8", cyan: "#00e5ff"
+};
+function hexToRgb(h) {
+  const n = parseInt(h.slice(1), 16);
+  return ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255);
+}
+let color = COLORS.green;
+let rgb = hexToRgb(color);
+function setColor(name) {
+  color = COLORS[name];
+  rgb = hexToRgb(color);
+  document.documentElement.style.setProperty("--c", color);
+}
+
+// ---- ORBIT PHYSICS ----
+const GM = 4 * Math.PI * Math.PI * Math.pow(100, 3) / 36;
+const MAX_BODIES = 10;
+let speed = 1;
+let paused = false;
+
+function makeBody(a, e, angle, comet) {
+  const b = { a: a, e: e, angle: angle, comet: comet };
+  const r = a * (1 + e);
+  const v = Math.sqrt(GM * (2 / r - 1 / a));
+  b.x = r * Math.cos(angle);
+  b.y = r * Math.sin(angle);
+  b.vx = -v * Math.sin(angle);
+  b.vy = v * Math.cos(angle);
+  b.T = 2 * Math.PI * Math.sqrt(Math.pow(a, 3) / GM);
+  return b;
+}
+
+const START = [
+  { a: 70,  e: 0.05, angle: 0.0 },
+  { a: 110, e: 0.20, angle: 1.6 },
+  { a: 160, e: 0.35, angle: 3.2 },
+  { a: 220, e: 0.30, angle: 4.7 }
+];
+const bodies = [];
+
+function updateLog() {
+  const rows = ["KEPLER LOG"];
+  bodies.forEach((b, i) => {
+    rows.push((i + 1) + (b.comet ? "C" : " ") + " a=" + Math.round(b.a) +
+      " e=" + b.e.toFixed(2) + " T=" + b.T.toFixed(1) + "s");
+  });
+  rows.push("T^2 / a^3 = SAME FOR ALL");
+  document.getElementById("kepler").innerHTML = rows.join("<br>");
+}
+
+function resetBodies() {
+  bodies.length = 0;
+  START.forEach(s => bodies.push(makeBody(s.a, s.e, s.angle, false)));
+  updateLog();
+}
+resetBodies();
+
+function addPlanet() {
+  const e = Math.random() * 0.4;
+  const maxA = Math.min(330 / (1 + e), 230);
+  const a = 60 + Math.random() * (maxA - 60);
+  bodies.push(makeBody(a, e, Math.random() * Math.PI * 2, false));
+  updateLog();
+}
+
+function addComet() {
+  bodies.push(makeBody(180, 0.85, Math.random() * Math.PI * 2, true));
+  updateLog();
+}
+
+function accel(b) {
+  const r2 = b.x * b.x + b.y * b.y;
+  const k = -GM / (r2 * Math.sqrt(r2));
+  return [b.x * k, b.y * k];
+}
+
+function step(dt) {
+  bodies.forEach(b => {
+    let [ax, ay] = accel(b);
+    b.vx += ax * dt / 2;
+    b.vy += ay * dt / 2;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    [ax, ay] = accel(b);
+    b.vx += ax * dt / 2;
+    b.vy += ay * dt / 2;
+  });
+}
+
+let last = 0;
+function draw(time) {
+  const dt = paused ? 0 : Math.min((time - last) / 1000, 0.05) * speed;
+  last = time;
+  for (let i = 0; i < 40; i++) step(dt / 40);
+
+  ctx.fillStyle = "rgba(0, 0, 0, 0.08)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const s = Math.min(canvas.width, canvas.height) / 2 / 340;
+
+  ctx.strokeStyle = "rgba(" + rgb + ", 0.12)";
+  ctx.lineWidth = 1;
+  bodies.forEach(b => {
+    const bb = b.a * Math.sqrt(1 - b.e * b.e);
+    ctx.beginPath();
+    ctx.ellipse(
+      cx + s * b.a * b.e * Math.cos(b.angle),
+      cy + s * b.a * b.e * Math.sin(b.angle),
+      s * b.a, s * bb, b.angle, 0, Math.PI * 2
+    );
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 30;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.shadowBlur = 20;
+  bodies.forEach(b => {
+    const px = cx + b.x * s;
+    const py = cy + b.y * s;
+    if (b.comet) {
+      const r = Math.sqrt(b.x * b.x + b.y * b.y);
+      const len = Math.min(120, 4000 / r) * s;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + (b.x / r) * len, py + (b.y / r) * len);
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.shadowColor = "#ffffff";
+    } else {
+      ctx.fillStyle = color;
+      ctx.shadowColor = color;
+    }
+    ctx.beginPath();
+    ctx.arc(px, py, b.comet ? 4 : 6, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.shadowBlur = 0;
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// ---- CLOCK ----
+function updateClock() {
+  document.getElementById("clock").textContent = new Date().toLocaleTimeString("de-AT");
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ---- TEXT OUTPUT AND VOICE OUTPUT ----
+const boot = document.getElementById("boot");
+const statusEl = document.getElementById("status");
+let busy = false;
+let session = 0;
+let activeRecognition = null;
+const GOODBYE = "Goodbye, double oh one. Systems on standby.";
+
+function addLine(text) {
+  const div = document.createElement("div");
+  div.textContent = "> " + text.replace(/double oh one/gi, "001");
+  boot.appendChild(div);
+  while (boot.children.length > 8) boot.removeChild(boot.firstChild);
+}
+
+function speak(text, onend) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-US";
+  if (onend) {
+    u.onend = onend;
+    u.onerror = (e) => {
+      if (e.error === "canceled" || e.error === "interrupted") return;
+      onend();
+    };
+  }
+  speechSynthesis.speak(u);
+}
+
+function endSession() {
+  busy = false;
+  statusEl.textContent = "STANDBY - CLAP TWICE";
+}
+
+function reply(text, keepListening) {
+  const my = session;
+  addLine(text);
+  speak(text, () => {
+    if (my !== session) return;
+    if (keepListening) listenOnce();
+    else endSession();
+  });
+}
+
+// Stops everything that is running and says goodbye.
+function goodbye() {
+  session++;
+  speechSynthesis.cancel();
+  if (activeRecognition) {
+    try { activeRecognition.abort(); } catch (e) {}
+    activeRecognition = null;
+  }
+  busy = true;
+  statusEl.textContent = "ACTIVE";
+  addLine(GOODBYE);
+  setTimeout(() => speak(GOODBYE, endSession), 150);
+}
+
+// ---- TIMER ----
+let timerId = null;
+let timerEnd = 0;
+const timerEl = document.getElementById("timer");
+
+function clearTimer() {
+  if (timerId) {
+    clearInterval(timerId);
+    timerId = null;
+  }
+  timerEl.textContent = "";
+}
+
+function setTimer(ms) {
+  clearTimer();
+  timerEnd = Date.now() + ms;
+  timerId = setInterval(() => {
+    const left = timerEnd - Date.now();
+    if (left <= 0) {
+      clearTimer();
+      addLine("TIMER DONE");
+      speak("Your timer is done, double oh one.");
+      return;
+    }
+    const sec = Math.ceil(left / 1000);
+    timerEl.textContent = "TIMER " +
+      String(Math.floor(sec / 60)).padStart(2, "0") + ":" +
+      String(sec % 60).padStart(2, "0");
+  }, 250);
+}
+
+// ---- VOICE COMMANDS ----
+function handleCommand(text) {
+  if (text.includes("timer")) {
+    if (/cancel|stop|clear|delete/.test(text)) {
+      clearTimer();
+      return reply("Timer cancelled.", true);
+    }
+    const m = text.match(/(\d+)[\s-]*(minute|min|second|sec)/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      const isSec = m[2].startsWith("sec");
+      setTimer(n * (isSec ? 1000 : 60000));
+      return reply("Timer set for " + n + (isSec ? " seconds." : " minutes."), true);
+    }
+    return reply("For how long? Say, start a 5 minute timer.", true);
+  }
+  if (text.includes("how many")) {
+    const comets = bodies.filter(b => b.comet).length;
+    const planets = bodies.length - comets;
+    return reply("There are " + planets + " planets and " + comets + " comets.", true);
+  }
+  if (/remove|delete/.test(text) && (text.includes("planet") || text.includes("comet"))) {
+    if (bodies.length <= 1) return reply("I need at least one body.", true);
+    bodies.pop();
+    updateLog();
+    return reply("Removed the last body.", true);
+  }
+  if (text.includes("comet")) {
+    if (bodies.length >= MAX_BODIES) return reply("That is the maximum of ten bodies.", true);
+    addComet();
+    return reply("Comet added.", true);
+  }
+  if (text.includes("planet")) {
+    if (bodies.length >= MAX_BODIES) return reply("That is the maximum of ten bodies.", true);
+    addPlanet();
+    return reply("Planet added.", true);
+  }
+  if (text.includes("pause") || text.includes("freeze")) {
+    paused = true;
+    return reply("Orbits paused.", true);
+  }
+  if (text.includes("resume") || text.includes("continue")) {
+    paused = false;
+    return reply("Orbits running.", true);
+  }
+  if (text.includes("reverse") || text.includes("backward")) {
+    bodies.forEach(b => {
+      b.vx = -b.vx;
+      b.vy = -b.vy;
+    });
+    return reply("Reversing time.", true);
+  }
+  if (/\btime\b/.test(text)) {
+    const now = new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    return reply("It's " + now + ".", true);
+  }
+  if (text.includes("faster") || text.includes("speed up")) {
+    speed = Math.min(speed * 1.5, 4);
+    return reply("Speeding up the orbits.", true);
+  }
+  if (text.includes("slower") || text.includes("slow down")) {
+    speed = Math.max(speed / 1.5, 0.2);
+    return reply("Slowing down the orbits.", true);
+  }
+  if (text.includes("reset") || text.includes("normal")) {
+    speed = 1;
+    paused = false;
+    setColor("green");
+    resetBodies();
+    return reply("Back to normal.", true);
+  }
+  const cname = Object.keys(COLORS).find(c => text.includes(c));
+  if (cname) {
+    setColor(cname);
+    return reply("Color set to " + cname + ".", true);
+  }
+  if (/\b(hello|hi|hey)\b/.test(text)) {
+    return reply("Hello, double oh one.", true);
+  }
+  if (/\b(stop|goodbye|bye|thanks|thank)\b/.test(text)) {
+    return reply(GOODBYE, false);
+  }
+  reply("I didn't understand. Try: time, timer, faster, pause, reverse, add a comet, or a color.", true);
+}
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let heard = false;
+
+function listenOnce() {
+  if (!SR) {
+    addLine("VOICE INPUT NOT SUPPORTED IN THIS BROWSER");
+    endSession();
+    return;
+  }
+  const my = session;
+  const recognition = new SR();
+  activeRecognition = recognition;
+  recognition.lang = "en-US";
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  heard = false;
+  statusEl.textContent = "LISTENING...";
+  recognition.onresult = (e) => {
+    if (my !== session) return;
+    heard = true;
+    const text = e.results[0][0].transcript.toLowerCase().trim();
+    addLine("YOU: " + text);
+    handleCommand(text);
+  };
+  recognition.onerror = (e) => {
+    if (my !== session) return;
+    if (e.error !== "no-speech" && e.error !== "aborted") {
+      addLine("VOICE ERROR: " + e.error);
+    }
+  };
+  recognition.onend = () => {
+    if (!heard && my === session) endSession();
+  };
+  try {
+    recognition.start();
+  } catch (err) {
+    endSession();
+  }
+}
+
+// ---- BOOT SEQUENCE ----
+const lines = [
+  "INITIALIZING...",
+  "LOADING MODULES...",
+  "SYSTEM ONLINE",
+  "WELCOME BACK, 001"
+];
+
+function runBoot() {
+  if (busy) return;
+  busy = true;
+  session++;
+  const my = session;
+  boot.innerHTML = "";
+  statusEl.textContent = "ACTIVE";
+  let i = 0;
+  function next() {
+    if (my !== session) return;
+    if (i >= lines.length) {
+      speak("What are we working on today, double oh one?", () => {
+        if (my === session) listenOnce();
+      });
+      return;
+    }
+    addLine(lines[i]);
+    i++;
+    setTimeout(next, 900);
+  }
+  next();
+}
+
+// ---- CLAP DETECTION ----
+let threshold = 0.15;
+const slider = document.getElementById("slider");
+const thval = document.getElementById("thval");
+const fill = document.getElementById("fill");
+const mark = document.getElementById("mark");
+function updateMark() {
+  mark.style.left = (threshold / 0.5 * 100) + "%";
+  thval.textContent = threshold.toFixed(2);
+}
+slider.addEventListener("input", () => {
+  threshold = parseFloat(slider.value);
+  updateMark();
+});
+updateMark();
+
+let analyser, data;
+let above = false;
+let lastClap = 0;
+let claps = [];
+let clapTimer = null;
+
+// Collects claps. 800 ms after the last clap, it counts them:
+// 2 claps wake the assistant, 3 or more say goodbye.
+function registerClap(now) {
+  claps.push(now);
+  clearTimeout(clapTimer);
+  clapTimer = setTimeout(() => {
+    const n = claps.length;
+    claps = [];
+    if (n >= 3) goodbye();
+    else if (n === 2) runBoot();
+  }, 800);
+}
+
+function listen() {
+  analyser.getFloatTimeDomainData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+  const level = Math.sqrt(sum / data.length);
+  fill.style.width = Math.min(level / 0.5, 1) * 100 + "%";
+  const now = performance.now();
+  if (level > threshold && !above && now - lastClap > 200 && !speechSynthesis.speaking) {
+    above = true;
+    lastClap = now;
+    registerClap(now);
+  }
+  if (level < threshold * 0.5) above = false;
+  requestAnimationFrame(listen);
+}
+
+document.getElementById("start").addEventListener("click", async () => {
+  const unlock = new SpeechSynthesisUtterance(" ");
+  unlock.volume = 0;
+  speechSynthesis.speak(unlock);
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    data = new Float32Array(analyser.fftSize);
+    source.connect(analyser);
+    document.getElementById("overlay").style.display = "none";
+    statusEl.textContent = "STANDBY - CLAP TWICE";
+    listen();
+  } catch (e) {
+    document.getElementById("start").textContent = "MICROPHONE BLOCKED - ALLOW IT AND REFRESH";
+  }
+});
+</script>
+</body>
+</html>
