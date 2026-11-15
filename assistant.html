@@ -494,7 +494,7 @@ function listen() {
   const level = Math.sqrt(sum / data.length);
   fill.style.width = Math.min(level / 0.5, 1) * 100 + "%";
   const now = performance.now();
-  if (level > threshold && !above && now - lastClap > 200 && !speechSynthesis.speaking) {
+  if (level > threshold && !above && now - lastClap > 200 && !(busy && speechSynthesis.speaking)) {
     above = true;
     lastClap = now;
     registerClap(now);
