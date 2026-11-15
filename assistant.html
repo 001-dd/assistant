@@ -518,7 +518,10 @@ document.getElementById("start").addEventListener("click", async () => {
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
     data = new Float32Array(analyser.fftSize);
-    source.connect(analyser);
+        const gain = audioCtx.createGain();
+    gain.gain.value = 8;
+    source.connect(gain);
+    gain.connect(analyser);
     document.getElementById("overlay").style.display = "none";
     statusEl.textContent = "STANDBY - AUDIO " + audioCtx.state.toUpperCase();
     listen();
