@@ -507,21 +507,23 @@ document.getElementById("start").addEventListener("click", async () => {
   const unlock = new SpeechSynthesisUtterance(" ");
   unlock.volume = 0;
   speechSynthesis.speak(unlock);
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   try {
+    await audioCtx.resume();
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
     });
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await audioCtx.resume();
     const source = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
     data = new Float32Array(analyser.fftSize);
     source.connect(analyser);
     document.getElementById("overlay").style.display = "none";
-    statusEl.textContent = "STANDBY - CLAP TWICE";
+    statusEl.textContent = "STANDBY - AUDIO " + audioCtx.state.toUpperCase();
     listen();
   } catch (e) {
-    document.getElementById("start").textContent = "MICROPHONE BLOCKED - ALLOW IT AND REFRESH";
+    document.getElementById("start").textContent = "MIC ERROR: " + e.name;
   }
 });
 </script>
