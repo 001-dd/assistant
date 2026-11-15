@@ -6,19 +6,23 @@
 <title>Assistant</title>
 <style>
   :root { --c: #39ff14; }
-  body { margin: 0; background: black; overflow: hidden; font-family: "Courier New", monospace; }
+  body { margin: 0; background: black; overflow: hidden; font-family: "Courier New", monospace; -webkit-user-select: none; user-select: none; }
   canvas { display: block; }
   .hud { position: fixed; color: var(--c); text-shadow: 0 0 10px var(--c); letter-spacing: 3px; }
   #title { top: 24px; left: 24px; font-size: 18px; }
   #kepler { top: 64px; left: 24px; font-size: 12px; line-height: 1.8; letter-spacing: 2px; opacity: 0.8; }
   #clock { top: 24px; right: 24px; font-size: 18px; }
   #timer { top: 24px; left: 50%; transform: translateX(-50%); font-size: 18px; }
-  #boot { bottom: 40px; left: 24px; font-size: 16px; line-height: 1.8; max-width: 55%; }
+  #boot { bottom: 40px; left: 24px; font-size: 16px; line-height: 1.8; max-width: 40%; }
   #panel { bottom: 40px; right: 24px; font-size: 13px; text-align: right; letter-spacing: 2px; }
   #bar { position: relative; width: 220px; height: 8px; border: 1px solid var(--c); margin: 8px 0 8px auto; }
   #fill { height: 100%; width: 0; background: var(--c); }
   #mark { position: absolute; top: -4px; width: 2px; height: 16px; background: white; }
   #slider { width: 220px; }
+  #controls { position: fixed; top: 64px; right: 24px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .cbtn { background: rgba(0,0,0,0.7); color: var(--c); border: 1px solid var(--c); padding: 9px 14px; font-family: inherit; font-size: 13px; letter-spacing: 2px; cursor: pointer; touch-action: manipulation; text-shadow: 0 0 8px var(--c); }
+  .dots { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; max-width: 180px; margin-top: 4px; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.6); cursor: pointer; padding: 0; touch-action: manipulation; }
   #overlay { position: fixed; inset: 0; background: black; display: flex; align-items: center; justify-content: center; z-index: 10; }
   #start { background: transparent; color: #39ff14; border: 1px solid #39ff14; padding: 16px 32px; font-family: inherit; font-size: 18px; letter-spacing: 3px; cursor: pointer; text-shadow: 0 0 10px #39ff14; box-shadow: 0 0 20px rgba(57,255,20,0.4); }
 </style>
@@ -30,8 +34,21 @@
 <div class="hud" id="clock"></div>
 <div class="hud" id="timer"></div>
 <div class="hud" id="boot"></div>
+<div id="controls">
+  <button class="cbtn" data-act="faster">FASTER</button>
+  <button class="cbtn" data-act="slower">SLOWER</button>
+  <button class="cbtn" data-act="pause" id="pauseBtn">PAUSE</button>
+  <button class="cbtn" data-act="reverse">REVERSE</button>
+  <button class="cbtn" data-act="planet">+ PLANET</button>
+  <button class="cbtn" data-act="comet">+ COMET</button>
+  <button class="cbtn" data-act="timer">TIMER 5 MIN</button>
+  <button class="cbtn" data-act="reset">RESET</button>
+  <button class="cbtn" data-act="voice">TEST VOICE</button>
+  <div class="dots" id="dots"></div>
+</div>
 <div class="hud" id="panel">
   <div id="status">OFFLINE</div>
+  <div id="clapinfo">CLAPS: 0</div>
   <div id="bar"><div id="fill"></div><div id="mark"></div></div>
   <div>THRESHOLD <span id="thval">0.15</span> (LOWER = MORE SENSITIVE)</div>
   <input type="range" id="slider" min="0.02" max="0.5" step="0.01" value="0.15">
@@ -39,6 +56,9 @@
 <div id="overlay"><button id="start">TAP TO ACTIVATE</button></div>
 
 <script>
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
 function resize() {
@@ -64,6 +84,15 @@ function setColor(name) {
   rgb = hexToRgb(color);
   document.documentElement.style.setProperty("--c", color);
 }
+const dotsEl = document.getElementById("dots");
+Object.keys(COLORS).forEach(name => {
+  const d = document.createElement("button");
+  d.className = "dot";
+  d.style.background = COLORS[name];
+  d.setAttribute("aria-label", name);
+  d.addEventListener("click", () => setColor(name));
+  dotsEl.appendChild(d);
+});
 
 // ---- ORBIT PHYSICS ----
 const GM = 4 * Math.PI * Math.PI * Math.pow(100, 3) / 36;
@@ -208,12 +237,14 @@ function updateClock() {
 setInterval(updateClock, 1000);
 updateClock();
 
-// ---- TEXT OUTPUT AND VOICE OUTPUT ----
+// ---- TEXT AND VOICE OUTPUT ----
 const boot = document.getElementById("boot");
 const statusEl = document.getElementById("status");
+const clapInfo = document.getElementById("clapinfo");
 let busy = false;
 let session = 0;
 let activeRecognition = null;
+let audioCtx = null;
 const GOODBYE = "Goodbye, double oh one. Systems on standby.";
 
 function addLine(text) {
@@ -223,18 +254,52 @@ function addLine(text) {
   while (boot.children.length > 8) boot.removeChild(boot.firstChild);
 }
 
+let speakId = 0;
+let pendingSpeech = null;
+
 function speak(text, onend) {
+  const myId = ++speakId;
+  let done = false;
+  let started = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(safety);
+    clearTimeout(check);
+    if (onend) onend();
+  };
+  const safety = setTimeout(finish, Math.max(3500, text.length * 130));
+  const check = setTimeout(() => {
+    if (!started && !done && myId === speakId) {
+      pendingSpeech = text;
+      addLine("TAP THE SCREEN TO HEAR ME");
+    }
+  }, 1800);
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "en-US";
-  if (onend) {
-    u.onend = onend;
-    u.onerror = (e) => {
-      if (e.error === "canceled" || e.error === "interrupted") return;
-      onend();
-    };
-  }
+  u.onstart = () => {
+    started = true;
+    pendingSpeech = null;
+  };
+  u.onend = finish;
+  u.onerror = (e) => {
+    if (e.error === "canceled" || e.error === "interrupted") return;
+    finish();
+  };
   speechSynthesis.speak(u);
 }
+
+// A tap is allowed to start speech on iPad, so it retries blocked speech.
+document.addEventListener("pointerdown", () => {
+  if (pendingSpeech) {
+    const t = pendingSpeech;
+    pendingSpeech = null;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = "en-US";
+    speechSynthesis.speak(u);
+  }
+});
 
 function endSession() {
   busy = false;
@@ -251,9 +316,10 @@ function reply(text, keepListening) {
   });
 }
 
-// Stops everything that is running and says goodbye.
 function goodbye() {
   session++;
+  speakId++;
+  pendingSpeech = null;
   speechSynthesis.cancel();
   if (activeRecognition) {
     try { activeRecognition.abort(); } catch (e) {}
@@ -263,6 +329,27 @@ function goodbye() {
   statusEl.textContent = "ACTIVE";
   addLine(GOODBYE);
   setTimeout(() => speak(GOODBYE, endSession), 150);
+}
+
+// ---- CHIME ----
+function chime() {
+  if (!audioCtx) return;
+  try {
+    [660, 880].forEach((f, i) => {
+      const t0 = audioCtx.currentTime + i * 0.35;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = "sine";
+      o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.6);
+      o.connect(g);
+      g.connect(audioCtx.destination);
+      o.start(t0);
+      o.stop(t0 + 0.7);
+    });
+  } catch (e) {}
 }
 
 // ---- TIMER ----
@@ -286,6 +373,7 @@ function setTimer(ms) {
     if (left <= 0) {
       clearTimer();
       addLine("TIMER DONE");
+      chime();
       speak("Your timer is done, double oh one.");
       return;
     }
@@ -296,7 +384,61 @@ function setTimer(ms) {
   }, 250);
 }
 
-// ---- VOICE COMMANDS ----
+function toggleTimer() {
+  if (timerId) {
+    clearTimer();
+    addLine("TIMER CANCELLED");
+  } else {
+    setTimer(5 * 60000);
+    addLine("TIMER SET FOR 5 MINUTES");
+  }
+}
+
+// ---- ACTIONS (used by buttons and by voice) ----
+const pauseBtn = document.getElementById("pauseBtn");
+function setPaused(v) {
+  paused = v;
+  pauseBtn.textContent = paused ? "RESUME" : "PAUSE";
+}
+function actFaster() { speed = Math.min(speed * 1.5, 4); }
+function actSlower() { speed = Math.max(speed / 1.5, 0.2); }
+function actReverse() {
+  bodies.forEach(b => {
+    b.vx = -b.vx;
+    b.vy = -b.vy;
+  });
+}
+function actPlanet() {
+  if (bodies.length >= MAX_BODIES) return false;
+  addPlanet();
+  return true;
+}
+function actComet() {
+  if (bodies.length >= MAX_BODIES) return false;
+  addComet();
+  return true;
+}
+function actReset() {
+  speed = 1;
+  setPaused(false);
+  setColor("green");
+  resetBodies();
+}
+
+document.querySelectorAll(".cbtn").forEach(b => b.addEventListener("click", () => {
+  const a = b.dataset.act;
+  if (a === "faster") actFaster();
+  else if (a === "slower") actSlower();
+  else if (a === "pause") setPaused(!paused);
+  else if (a === "reverse") actReverse();
+  else if (a === "planet") { if (!actPlanet()) addLine("MAXIMUM OF TEN BODIES"); }
+  else if (a === "comet") { if (!actComet()) addLine("MAXIMUM OF TEN BODIES"); }
+  else if (a === "timer") toggleTimer();
+  else if (a === "reset") actReset();
+  else if (a === "voice") speak("Voice test, double oh one.");
+}));
+
+// ---- VOICE COMMANDS (laptop) ----
 function handleCommand(text) {
   if (text.includes("timer")) {
     if (/cancel|stop|clear|delete/.test(text)) {
@@ -314,8 +456,7 @@ function handleCommand(text) {
   }
   if (text.includes("how many")) {
     const comets = bodies.filter(b => b.comet).length;
-    const planets = bodies.length - comets;
-    return reply("There are " + planets + " planets and " + comets + " comets.", true);
+    return reply("There are " + (bodies.length - comets) + " planets and " + comets + " comets.", true);
   }
   if (/remove|delete/.test(text) && (text.includes("planet") || text.includes("comet"))) {
     if (bodies.length <= 1) return reply("I need at least one body.", true);
@@ -324,28 +465,23 @@ function handleCommand(text) {
     return reply("Removed the last body.", true);
   }
   if (text.includes("comet")) {
-    if (bodies.length >= MAX_BODIES) return reply("That is the maximum of ten bodies.", true);
-    addComet();
+    if (!actComet()) return reply("That is the maximum of ten bodies.", true);
     return reply("Comet added.", true);
   }
   if (text.includes("planet")) {
-    if (bodies.length >= MAX_BODIES) return reply("That is the maximum of ten bodies.", true);
-    addPlanet();
+    if (!actPlanet()) return reply("That is the maximum of ten bodies.", true);
     return reply("Planet added.", true);
   }
   if (text.includes("pause") || text.includes("freeze")) {
-    paused = true;
+    setPaused(true);
     return reply("Orbits paused.", true);
   }
   if (text.includes("resume") || text.includes("continue")) {
-    paused = false;
+    setPaused(false);
     return reply("Orbits running.", true);
   }
   if (text.includes("reverse") || text.includes("backward")) {
-    bodies.forEach(b => {
-      b.vx = -b.vx;
-      b.vy = -b.vy;
-    });
+    actReverse();
     return reply("Reversing time.", true);
   }
   if (/\btime\b/.test(text)) {
@@ -353,18 +489,15 @@ function handleCommand(text) {
     return reply("It's " + now + ".", true);
   }
   if (text.includes("faster") || text.includes("speed up")) {
-    speed = Math.min(speed * 1.5, 4);
+    actFaster();
     return reply("Speeding up the orbits.", true);
   }
   if (text.includes("slower") || text.includes("slow down")) {
-    speed = Math.max(speed / 1.5, 0.2);
+    actSlower();
     return reply("Slowing down the orbits.", true);
   }
   if (text.includes("reset") || text.includes("normal")) {
-    speed = 1;
-    paused = false;
-    setColor("green");
-    resetBodies();
+    actReset();
     return reply("Back to normal.", true);
   }
   const cname = Object.keys(COLORS).find(c => text.includes(c));
@@ -385,6 +518,11 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let heard = false;
 
 function listenOnce() {
+  if (IS_IOS) {
+    addLine("USE THE BUTTONS ON THE RIGHT");
+    endSession();
+    return;
+  }
   if (!SR) {
     addLine("VOICE INPUT NOT SUPPORTED IN THIS BROWSER");
     endSession();
@@ -474,14 +612,15 @@ let lastClap = 0;
 let claps = [];
 let clapTimer = null;
 
-// Collects claps. 800 ms after the last clap, it counts them:
-// 2 claps wake the assistant, 3 or more say goodbye.
+// 800 ms after the last clap, count them: 2 = wake up, 3 or more = goodbye.
 function registerClap(now) {
   claps.push(now);
+  clapInfo.textContent = "CLAPS: " + claps.length;
   clearTimeout(clapTimer);
   clapTimer = setTimeout(() => {
     const n = claps.length;
     claps = [];
+    clapInfo.textContent = "LAST: " + n + (n === 1 ? " CLAP" : " CLAPS");
     if (n >= 3) goodbye();
     else if (n === 2) runBoot();
   }, 800);
@@ -499,15 +638,14 @@ function listen() {
     lastClap = now;
     registerClap(now);
   }
-  if (level < threshold * 0.5) above = false;
+  if (above && now - lastClap > 120 && level < threshold) above = false;
   requestAnimationFrame(listen);
 }
 
+// ---- START ----
 document.getElementById("start").addEventListener("click", async () => {
-  const unlock = new SpeechSynthesisUtterance(" ");
-  unlock.volume = 0;
-  speechSynthesis.speak(unlock);
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  speak("Online.");
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   try {
     await audioCtx.resume();
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -518,8 +656,8 @@ document.getElementById("start").addEventListener("click", async () => {
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
     data = new Float32Array(analyser.fftSize);
-        const gain = audioCtx.createGain();
-    gain.gain.value = 8;
+    const gain = audioCtx.createGain();
+    gain.gain.value = IS_IOS ? 8 : 1;
     source.connect(gain);
     gain.connect(analyser);
     document.getElementById("overlay").style.display = "none";
